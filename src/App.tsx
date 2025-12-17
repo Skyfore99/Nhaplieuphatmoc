@@ -461,6 +461,10 @@ function handleRequest(e) {
 
   const fetchData = async (isAuto = false) => {
     if (!scriptUrl || selectedYears.length === 0) return;
+
+    // Đánh dấu mốc thời gian bắt đầu tải
+    const fetchStartTime = Date.now();
+
     if (!isAuto) {
       setIsFetching(true);
       setSyncStatus("syncing");
@@ -476,6 +480,17 @@ function handleRequest(e) {
         tempId: `server-${index}`,
       }));
       setFetchedData(formattedData);
+
+      // FIX LỖI X2 DỮ LIỆU:
+      // Xóa các dữ liệu tạm (Local) nếu chúng đã được nhập TRƯỚC khi quá trình tải bắt đầu.
+      // Giữ lại các dữ liệu tạm MỚI nhập trong lúc đang tải (để không bị mất).
+      setLocalData((prev) =>
+        prev.filter((item) => {
+          const itemTime = typeof item.tempId === "number" ? item.tempId : 0;
+          return itemTime > fetchStartTime;
+        })
+      );
+
       await fetchMasterData(scriptUrl);
       if (!isAuto) {
         setSyncStatus("complete");
@@ -536,6 +551,7 @@ function handleRequest(e) {
       });
       setStatus("success");
       const year = formData.date.split("-")[0];
+      // Thêm tempId là thời gian thực để phân biệt với dữ liệu Server
       const newRecord = {
         ...formData,
         year: year,
@@ -914,6 +930,7 @@ function handleRequest(e) {
           </div>
         )}
 
+        {/* ... (Các phần Tab Data và Config giữ nguyên như cũ) ... */}
         {activeTab === "data" && (
           <div className="space-y-6 animate-fade-in-up">
             <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
