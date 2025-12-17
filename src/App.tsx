@@ -61,6 +61,7 @@ interface TransactionData {
   group: string;
   quantity: string | number;
   displayDate?: string;
+  isLocal?: boolean; // Flag to identify local temporary data
 }
 
 interface MasterDataItem {
@@ -203,6 +204,7 @@ export default function App() {
   // Editing State
   const [editingItem, setEditingItem] = useState<any>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Config & Filter State
   const [configInput, setConfigInput] = useState({
@@ -232,7 +234,7 @@ export default function App() {
     setFilterEndDate("");
   };
 
-  // --- MÃ SCRIPT ---
+  // --- MÃ SCRIPT (V5 - CÓ DELETE) ---
   const googleScriptCode = `function doPost(e) {
   return handleRequest(e);
 }
@@ -280,6 +282,15 @@ function handleRequest(e) {
       var sheet = ss.getSheetByName(postData.year);
       if (sheet) {
         sheet.getRange(postData.rowIndex, 8).setValue(postData.quantity);
+        return ContentService.createTextOutput(JSON.stringify({ "result": "success" })).setMimeType(ContentService.MimeType.JSON);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ "result": "error", "message": "Sheet not found" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action == 'deleteTransaction') {
+      var sheet = ss.getSheetByName(postData.year);
+      if (sheet) {
+        sheet.deleteRow(postData.rowIndex);
         return ContentService.createTextOutput(JSON.stringify({ "result": "success" })).setMimeType(ContentService.MimeType.JSON);
       }
       return ContentService.createTextOutput(JSON.stringify({ "result": "error", "message": "Sheet not found" })).setMimeType(ContentService.MimeType.JSON);
@@ -353,9 +364,30 @@ function handleRequest(e) {
     return new Date(str);
   };
 
-  const allDisplayData = [...localData, ...fetchedData].sort(
-    (a: any, b: any) => b.tempId - a.tempId
-  );
+  const allDisplayData = useMemo(() => {
+    const uniqueLocal = localData.filter((local) => {
+      const existsInFetched = fetchedData.some(
+        (fetched) =>
+          fetched.id === local.id &&
+          fetched.order === local.order &&
+          fetched.pantsCode === local.pantsCode &&
+          fetched.shirtCode === local.shirtCode &&
+          fetched.group === local.group &&
+          (fetched.date === local.date ||
+            parseDate(fetched.date)?.toDateString() ===
+              parseDate(local.date)?.toDateString()) &&
+          String(fetched.quantity) === String(local.quantity)
+      );
+      return !existsInFetched;
+    });
+
+    const sortedFetched = [...fetchedData].reverse();
+    const sortedLocal = [...uniqueLocal].sort(
+      (a: any, b: any) => b.tempId - a.tempId
+    );
+
+    return [...sortedLocal, ...sortedFetched];
+  }, [localData, fetchedData]);
 
   const filteredData = allDisplayData.filter((item) => {
     const matchId = filterId
@@ -370,7 +402,6 @@ function handleRequest(e) {
     const matchCode = filterCode
       ? pCode.includes(searchCode) || sCode.includes(searchCode)
       : true;
-
     let itemYear = item.year;
     if (!itemYear && item.date) {
       const dStr = String(item.date);
@@ -378,7 +409,6 @@ function handleRequest(e) {
       else if (dStr.includes("/")) itemYear = dStr.split("/")[2];
     }
     const matchYear = selectedYears.includes(String(itemYear));
-
     let matchDateRange = true;
     if (filterStartDate || filterEndDate) {
       const itemDateObj = parseDate(item.date);
@@ -404,7 +434,6 @@ function handleRequest(e) {
     0
   );
 
-  // --- PAGINATION ---
   const totalPages = Math.ceil(filteredData.length / itemsPerPage);
   const paginatedData = filteredData.slice(
     (currentPage - 1) * itemsPerPage,
@@ -422,7 +451,6 @@ function handleRequest(e) {
     selectedYears,
   ]);
 
-  // --- EFFECTS & SYNC ---
   useEffect(() => {
     const scriptId = "tailwind-cdn-script";
     if (!document.getElementById(scriptId)) {
@@ -447,7 +475,6 @@ function handleRequest(e) {
     return () => clearInterval(interval);
   }, [scriptUrl, selectedYears]);
 
-  // --- API CALLS ---
   const fetchMasterData = async (url: string) => {
     if (!url) return;
     try {
@@ -461,10 +488,7 @@ function handleRequest(e) {
 
   const fetchData = async (isAuto = false) => {
     if (!scriptUrl || selectedYears.length === 0) return;
-
-    // Đánh dấu mốc thời gian bắt đầu tải
     const fetchStartTime = Date.now();
-
     if (!isAuto) {
       setIsFetching(true);
       setSyncStatus("syncing");
@@ -480,17 +504,12 @@ function handleRequest(e) {
         tempId: `server-${index}`,
       }));
       setFetchedData(formattedData);
-
-      // FIX LỖI X2 DỮ LIỆU:
-      // Xóa các dữ liệu tạm (Local) nếu chúng đã được nhập TRƯỚC khi quá trình tải bắt đầu.
-      // Giữ lại các dữ liệu tạm MỚI nhập trong lúc đang tải (để không bị mất).
       setLocalData((prev) =>
         prev.filter((item) => {
           const itemTime = typeof item.tempId === "number" ? item.tempId : 0;
           return itemTime > fetchStartTime;
         })
       );
-
       await fetchMasterData(scriptUrl);
       if (!isAuto) {
         setSyncStatus("complete");
@@ -507,7 +526,6 @@ function handleRequest(e) {
     }
   };
 
-  // --- HANDLERS ---
   const handleSaveConfig = async (e: any) => {
     e.preventDefault();
     if (!configInput.value.trim() || !scriptUrl) return;
@@ -551,12 +569,12 @@ function handleRequest(e) {
       });
       setStatus("success");
       const year = formData.date.split("-")[0];
-      // Thêm tempId là thời gian thực để phân biệt với dữ liệu Server
       const newRecord = {
         ...formData,
         year: year,
         tempId: Date.now(),
         displayDate: formData.date.split("-").reverse().join("/"),
+        isLocal: true,
       };
       setLocalData((prev) => [newRecord, ...prev]);
       setFormData((prev) => ({
@@ -613,6 +631,34 @@ function handleRequest(e) {
     }
   };
 
+  const handleDelete = async (item: TransactionData) => {
+    if (!scriptUrl) return;
+    if (!item.rowIndex) {
+      setLocalData((prev) => prev.filter((i) => i.tempId !== item.tempId));
+      return;
+    }
+    if (!window.confirm("Bạn có chắc chắn muốn xóa dòng này không?")) return;
+    setIsDeleting(true);
+    try {
+      await fetch(scriptUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({
+          action: "deleteTransaction",
+          year: item.year,
+          rowIndex: item.rowIndex,
+        }),
+      });
+      alert("Đã xóa! Đang đồng bộ lại dữ liệu...");
+      setTimeout(() => fetchData(false), 1000);
+    } catch (error) {
+      alert("Lỗi khi xóa.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleUrlSave = (url: string) => {
     setScriptUrl(url);
     localStorage.setItem("google_script_url", url);
@@ -627,7 +673,7 @@ function handleRequest(e) {
     );
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    alert("Đã copy mã Script V4!");
+    alert("Đã copy mã Script V5!");
   };
 
   // --- RENDER ---
@@ -673,44 +719,35 @@ function handleRequest(e) {
                 </>
               )}
             </div>
-            <div
-              className={`flex items-center gap-2 px-2 py-1.5 md:px-3 rounded-full text-xs font-bold transition-all shadow-lg ${
-                scriptUrl
-                  ? "bg-green-600 text-white shadow-green-900/30"
-                  : "bg-red-600 text-white animate-pulse"
-              }`}
-            >
-              <Wifi className="h-3.5 w-3.5" />
-              <span className="hidden md:inline">
-                {scriptUrl ? "Đã kết nối" : "Ngắt kết nối"}
-              </span>
-            </div>
+            {/* --- NÚT HEADER TO & NỔI KHỐI --- */}
             <button
               onClick={() => fetchData(false)}
               disabled={isFetching}
-              className="flex items-center gap-2 px-2 py-1.5 md:px-3 rounded-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all shadow-lg shadow-blue-900/30 active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed"
+              className="flex items-center justify-center w-10 h-10 md:w-auto md:px-4 md:py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/40 active:scale-95 transition-all disabled:opacity-70"
             >
               <RefreshCw
-                className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`}
+                className={`h-5 w-5 ${isFetching ? "animate-spin" : ""}`}
               />
-              <span className="hidden md:inline">Đồng bộ</span>
+              <span className="hidden md:inline ml-2 font-bold text-sm">
+                Đồng bộ
+              </span>
             </button>
-            <div className="h-6 w-px bg-slate-700 mx-0.5 md:mx-1"></div>
+            <div className="h-8 w-px bg-slate-700 mx-1 md:mx-2"></div>
             <button
               onClick={() => setShowGuide(true)}
-              className="p-1.5 md:p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+              className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl shadow-md active:scale-95 transition-all"
               title="Hướng dẫn"
             >
               <BookOpen className="h-5 w-5" />
             </button>
             <button
               onClick={() => setShowSettings(true)}
-              className="p-1.5 md:p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors relative"
+              className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl shadow-md active:scale-95 transition-all relative"
               title="Cài đặt"
             >
               <Settings className="h-5 w-5" />
               {!scriptUrl && (
-                <span className="absolute top-1.5 right-1.5 h-2 w-2 bg-red-500 rounded-full animate-ping"></span>
+                <span className="absolute top-2 right-2 h-2 w-2 bg-red-500 rounded-full animate-ping"></span>
               )}
             </button>
           </div>
@@ -930,7 +967,7 @@ function handleRequest(e) {
           </div>
         )}
 
-        {/* ... (Các phần Tab Data và Config giữ nguyên như cũ) ... */}
+        {/* ... (Tab Data with Bigger Buttons) ... */}
         {activeTab === "data" && (
           <div className="space-y-6 animate-fade-in-up">
             <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
@@ -1070,6 +1107,12 @@ function handleRequest(e) {
                           <td className="px-4 py-3 whitespace-nowrap">
                             {item.displayDate ||
                               (item.date && String(item.date).split("T")[0])}
+                            {item.isLocal && (
+                              <span
+                                className="ml-1 inline-block w-2 h-2 rounded-full bg-blue-500"
+                                title="Chưa đồng bộ"
+                              ></span>
+                            )}
                           </td>
                           <td className="px-4 py-3 font-medium text-blue-600 whitespace-nowrap">
                             {item.id}
@@ -1111,34 +1154,48 @@ function handleRequest(e) {
                                 <button
                                   onClick={handleUpdateQuantity}
                                   disabled={isUpdating}
-                                  className="p-1 bg-green-500 text-white rounded hover:bg-green-600"
+                                  className="w-8 h-8 flex items-center justify-center bg-green-500 text-white rounded-lg hover:bg-green-600 shadow-md"
                                 >
-                                  <Check className="w-3 h-3" />
+                                  <Check className="w-4 h-4" />
                                 </button>
                                 <button
                                   onClick={() => setEditingItem(null)}
-                                  className="p-1 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                                  className="w-8 h-8 flex items-center justify-center bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 shadow-md"
                                 >
-                                  <XCircle className="w-3 h-3" />
+                                  <XCircle className="w-4 h-4" />
                                 </button>
                               </div>
                             ) : (
                               <>
                                 <span>{item.quantity}</span>
-                                <button
-                                  onClick={() =>
-                                    setEditingItem({
-                                      tempId: item.tempId,
-                                      rowIndex: item.rowIndex,
-                                      year: item.year,
-                                      quantity: item.quantity,
-                                    })
-                                  }
-                                  className="opacity-0 group-hover:opacity-100 p-1 text-blue-400 hover:text-blue-600 transition-opacity"
-                                  title="Sửa số lượng"
-                                >
-                                  <Edit2 className="w-3 h-3" />
-                                </button>
+                                {!item.isLocal && (
+                                  <div className="flex gap-2 ml-2">
+                                    {/* --- NÚT SỬA TO RÕ RÀNG --- */}
+                                    <button
+                                      onClick={() =>
+                                        setEditingItem({
+                                          tempId: item.tempId,
+                                          rowIndex: item.rowIndex,
+                                          year: item.year,
+                                          quantity: item.quantity,
+                                        })
+                                      }
+                                      className="w-8 h-8 flex items-center justify-center bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 shadow-sm border border-blue-200"
+                                      title="Sửa số lượng"
+                                    >
+                                      <Edit2 className="w-4 h-4" />
+                                    </button>
+                                    {/* --- NÚT XÓA TO RÕ RÀNG --- */}
+                                    <button
+                                      onClick={() => handleDelete(item)}
+                                      disabled={isDeleting}
+                                      className="w-8 h-8 flex items-center justify-center bg-red-100 text-red-600 rounded-lg hover:bg-red-200 shadow-sm border border-red-200"
+                                      title="Xóa dòng"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                )}
                               </>
                             )}
                           </td>
@@ -1158,43 +1215,42 @@ function handleRequest(e) {
                 </table>
               </div>
 
-              {/* THANH PHÂN TRANG */}
+              {/* THANH PHÂN TRANG - TO HƠN */}
               {totalPages > 1 && (
-                <div className="px-4 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
-                  <div className="text-xs text-slate-500">
-                    Trang {currentPage} / {totalPages} ({filteredData.length}{" "}
-                    dòng)
+                <div className="px-4 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
+                  <div className="text-xs text-slate-500 font-medium">
+                    Trang {currentPage}/{totalPages}
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex gap-2">
                     <button
                       onClick={() => setCurrentPage(1)}
                       disabled={currentPage === 1}
-                      className="p-1.5 rounded-lg border bg-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600"
+                      className="w-10 h-10 flex items-center justify-center rounded-xl border bg-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600 active:scale-95 transition-transform"
                     >
-                      <ChevronsLeft className="h-4 w-4" />
+                      <ChevronsLeft className="h-5 w-5" />
                     </button>
                     <button
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                       disabled={currentPage === 1}
-                      className="p-1.5 rounded-lg border bg-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600"
+                      className="w-10 h-10 flex items-center justify-center rounded-xl border bg-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600 active:scale-95 transition-transform"
                     >
-                      <ChevronLeft className="h-4 w-4" />
+                      <ChevronLeft className="h-5 w-5" />
                     </button>
                     <button
                       onClick={() =>
                         setCurrentPage((p) => Math.min(totalPages, p + 1))
                       }
                       disabled={currentPage === totalPages}
-                      className="p-1.5 rounded-lg border bg-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600"
+                      className="w-10 h-10 flex items-center justify-center rounded-xl border bg-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600 active:scale-95 transition-transform"
                     >
-                      <ChevronRight className="h-4 w-4" />
+                      <ChevronRight className="h-5 w-5" />
                     </button>
                     <button
                       onClick={() => setCurrentPage(totalPages)}
                       disabled={currentPage === totalPages}
-                      className="p-1.5 rounded-lg border bg-white disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600"
+                      className="w-10 h-10 flex items-center justify-center rounded-xl border bg-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-100 text-slate-600 active:scale-95 transition-transform"
                     >
-                      <ChevronsRight className="h-4 w-4" />
+                      <ChevronsRight className="h-5 w-5" />
                     </button>
                   </div>
                 </div>
@@ -1203,6 +1259,7 @@ function handleRequest(e) {
           </div>
         )}
 
+        {/* ... (Tab Config giữ nguyên) ... */}
         {activeTab === "config" && (
           <div className="space-y-6 animate-fade-in-up">
             <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-xl shadow-lg p-6 text-white mb-6">
@@ -1354,7 +1411,7 @@ function handleRequest(e) {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="bg-slate-900 p-4 flex justify-between items-center sticky top-0">
               <h2 className="text-white font-bold flex gap-2">
-                <BookOpen className="h-5 w-5" /> Cập nhật Script (V4 - Quan
+                <BookOpen className="h-5 w-5" /> Cập nhật Script (V5 - Quan
                 Trọng)
               </h2>
               <button onClick={() => setShowGuide(false)}>
@@ -1363,8 +1420,7 @@ function handleRequest(e) {
             </div>
             <div className="p-6 text-sm text-slate-700 space-y-4">
               <p className="font-bold text-red-600 bg-red-50 p-3 rounded border border-red-200">
-                Bạn cần cập nhật mã Script mới V4 để sử dụng tính năng "Sửa Số
-                Lượng"!
+                Bạn cần cập nhật mã Script mới V5 để sử dụng tính năng "Xóa"!
               </p>
               <div className="bg-slate-800 text-slate-200 p-3 rounded-lg relative font-mono text-xs max-h-60 overflow-y-auto">
                 <pre>{googleScriptCode}</pre>
